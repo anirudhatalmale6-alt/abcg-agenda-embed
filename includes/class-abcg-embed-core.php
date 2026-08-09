@@ -97,14 +97,14 @@ class ABCG_Embed_Core {
 		$error        = curl_error( $ch );
 		curl_close( $ch );
 
-		if ( false === $body ) {
+		if ( false === $body || $status >= 400 ) {
 			return array(
 				'status'       => 502,
 				'body'         => '<!doctype html><meta charset="utf-8"><p>Agenda momentanément indisponible.</p>',
 				'content_type' => 'text/html; charset=utf-8',
 				'set_cookie'   => array(),
 				'location'     => '',
-				'error'        => $error,
+				'error'        => $error ? $error : ( 'upstream HTTP ' . $status ),
 			);
 		}
 
@@ -214,8 +214,13 @@ class ABCG_Embed_Core {
 		return $html;
 	}
 
-	/** Markup for the embed: an auto-sizing iframe plus its listener. */
-	public static function render_embed( $view, $proxy_url, $frame_id, $initial_height = 300 ) {
+	/**
+	 * Markup for the embed: an auto-sizing iframe plus its listener.
+	 *
+	 * @param bool $inline_script Emit parent.js inline. WordPress enqueues it
+	 *                            instead, so it passes false.
+	 */
+	public static function render_embed( $view, $proxy_url, $frame_id, $initial_height = 300, $inline_script = true ) {
 		$src = $proxy_url . ( strpos( $proxy_url, '?' ) === false ? '?' : '&' ) . 'abcgid=' . rawurlencode( $frame_id );
 
 		$html  = '<div class="abcg-embed-wrap">';
@@ -227,7 +232,9 @@ class ABCG_Embed_Core {
 			. ' style="display:block;width:100%;border:0;"'
 			. ' title="Agenda"></iframe>';
 		$html .= '</div>';
-		$html .= '<script>' . self::asset( 'parent.js' ) . '</script>';
+		if ( $inline_script ) {
+			$html .= '<script>' . self::asset( 'parent.js' ) . '</script>';
+		}
 
 		return $html;
 	}

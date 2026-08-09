@@ -37,6 +37,7 @@ function abcg_embed_activate() {
 register_activation_hook( __FILE__, 'abcg_embed_activate' );
 
 function abcg_embed_deactivate() {
+	delete_option( 'abcg_embed_transport' );
 	flush_rewrite_rules();
 }
 register_deactivation_hook( __FILE__, 'abcg_embed_deactivate' );
@@ -49,6 +50,57 @@ function abcg_embed_endpoint_url( $view ) {
 		return home_url( '/abcg-embed/' . $view . '/' );
 	}
 	return home_url( '/?abcg_embed=' . $view );
+}
+
+/**
+ * Fallback transport when the direct cURL call fails.
+ */
+function abcg_embed_fetch_via_wp_http( $view, array $request, array $failed ) {
+	$args = array(
+		'timeout'     => 20,
+		'redirection' => 0,
+		'sslverify'   => true,
+		'user-agent'  => $request['user_agent'] ? $request['user_agent'] : 'Mozilla/5.0',
+		'headers'     => array(),
+	);
+
+	$cookie_str = ABCG_Embed_Core::forwarded_cookie_header( $request['cookies'] );
+	if ( '' !== $cookie_str ) {
+		$args['headers']['Cookie'] = $cookie_str;
+	}
+
+	if ( 'POST' === strtoupper( $request['method'] ) ) {
+		$args['method']                  = 'POST';
+		$args['body']                    = $request['body'];
+		$args['headers']['Content-Type'] = $request['content_type'] ? $request['content_type'] : 'application/x-www-form-urlencoded';
+	}
+
+	$result = wp_remote_request( ABCG_Embed_Core::upstream_url( $view ), $args );
+
+	if ( is_wp_error( $result ) ) {
+		$failed['error'] .= ' | wp_http: ' . $result->get_error_message();
+		return $failed;
+	}
+
+	$code = (int) wp_remote_retrieve_response_code( $result );
+	if ( $code >= 400 ) {
+		$failed['error'] .= ' | wp_http HTTP ' . $code;
+		return $failed;
+	}
+
+	$set_cookie = wp_remote_retrieve_header( $result, 'set-cookie' );
+	if ( is_string( $set_cookie ) ) {
+		$set_cookie = '' === $set_cookie ? array() : array( $set_cookie );
+	}
+
+	return array(
+		'status'       => $code ? $code : 200,
+		'body'         => wp_remote_retrieve_body( $result ),
+		'content_type' => wp_remote_retrieve_header( $result, 'content-type' ),
+		'set_cookie'   => is_array( $set_cookie ) ? $set_cookie : array(),
+		'location'     => wp_remote_retrieve_header( $result, 'location' ),
+		'error'        => '',
+	);
 }
 
 /**
@@ -78,7 +130,27 @@ function abcg_embed_maybe_serve() {
 		'cookies'         => $_COOKIE,
 	);
 
-	$response  = ABCG_Embed_Core::fetch( $view, $request );
+	/*
+	 * Some hosts block direct cURL to another host; WordPress's own HTTP layer
+	 * may still get through. Whichever works is remembered, so the blocked
+	 * transport is not retried on every single request.
+	 */
+	if ( 'wp_http' === get_option( 'abcg_embed_transport' ) ) {
+		$response = abcg_embed_fetch_via_wp_http( $view, $request, array( 'error' => 'curl skipped' ) );
+		if ( ! empty( $response['error'] ) ) {
+			delete_option( 'abcg_embed_transport' );
+			$response = ABCG_Embed_Core::fetch( $view, $request );
+		}
+	} else {
+		$response = ABCG_Embed_Core::fetch( $view, $request );
+		if ( ! empty( $response['error'] ) ) {
+			$response = abcg_embed_fetch_via_wp_http( $view, $request, $response );
+			if ( empty( $response['error'] ) ) {
+				update_option( 'abcg_embed_transport', 'wp_http', false );
+			}
+		}
+	}
+
 	$proxy_url = abcg_embed_endpoint_url( $view );
 
 	nocache_headers();
@@ -109,11 +181,40 @@ function abcg_embed_maybe_serve() {
 
 	$frame_id = isset( $_GET['abcgid'] ) ? sanitize_text_field( wp_unslash( $_GET['abcgid'] ) ) : '';
 
+	// Visible only to an administrator, so a fetch failure can be diagnosed
+	// without guessing at the host's outbound rules.
+	if ( ! empty( $response['error'] ) && current_user_can( 'manage_options' ) ) {
+		$response['body'] .= "\n<!-- abcg upstream error: "
+			. esc_html( $response['error'] ) . " -->\n";
+	}
+
 	header( 'Content-Type: text/html; charset=utf-8' );
 	echo ABCG_Embed_Core::transform( $response['body'], $view, $proxy_url, $frame_id ); // phpcs:ignore WordPress.Security.EscapeOutput
 	exit;
 }
 add_action( 'template_redirect', 'abcg_embed_maybe_serve', 0 );
+
+/**
+ * The listener is a real script file so it also covers embeds written as plain
+ * markup — Divi code modules do not always run a nested shortcode.
+ */
+function abcg_embed_register_script() {
+	wp_register_script(
+		'abcg-embed-parent',
+		plugins_url( 'assets/parent.js', __FILE__ ),
+		array(),
+		ABCG_EMBED_VERSION,
+		true
+	);
+
+	if ( is_singular() ) {
+		$post = get_post();
+		if ( $post && false !== strpos( $post->post_content, 'abcg-embed-frame' ) ) {
+			wp_enqueue_script( 'abcg-embed-parent' );
+		}
+	}
+}
+add_action( 'wp_enqueue_scripts', 'abcg_embed_register_script' );
 
 /**
  * [abcg_agenda view="next"] / [abcg_agenda view="list"]
@@ -137,11 +238,14 @@ function abcg_embed_shortcode( $atts ) {
 	$count++;
 	$frame_id = 'abcg-agenda-' . $view . '-' . $count;
 
+	wp_enqueue_script( 'abcg-embed-parent' );
+
 	return ABCG_Embed_Core::render_embed(
 		$view,
 		abcg_embed_endpoint_url( $view ),
 		$frame_id,
-		(int) $atts['height']
+		(int) $atts['height'],
+		false
 	);
 }
 add_shortcode( 'abcg_agenda', 'abcg_embed_shortcode' );
