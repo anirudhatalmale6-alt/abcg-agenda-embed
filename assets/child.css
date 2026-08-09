@@ -1,0 +1,13 @@
+/* Applied inside the embedded agenda page. */
+html {
+	-webkit-text-size-adjust: 100%;
+	/* The frame is sized to the content, so a vertical bar is never needed.
+	   Horizontal stays scrollable so nothing becomes unreachable. */
+	overflow-y: hidden;
+	overflow-x: auto;
+}
+
+img {
+	max-width: 100%;
+	height: auto;
+}

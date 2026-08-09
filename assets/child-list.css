@@ -1,0 +1,34 @@
+/* Agenda rows: the date column is a fixed 300px float, so on a phone a row
+   needs ~742px and spills sideways. Below 780px the date stacks above the
+   title instead, which keeps every row inside the frame. */
+.cadre {
+	max-width: calc(100% - 24px);
+	box-sizing: border-box;
+}
+
+.cont {
+	flex-wrap: wrap;
+}
+
+@media (max-width: 780px) {
+	/* Two flex columns side by side leave ~250px per card on a phone. */
+	.cont {
+		display: block;
+	}
+
+	.dte {
+		float: none;
+		width: auto;
+		margin-right: 10px;
+		margin-bottom: 0;
+	}
+
+	.ttr {
+		float: none;
+		margin-top: 0;
+	}
+
+	.cadre {
+		float: none;
+	}
+}

@@ -1,0 +1,21 @@
+/* Home page cards: the source sets a fixed height:80px, which slices long titles. */
+.cdrNext {
+	height: auto !important;
+	min-height: 80px;
+	float: none !important;
+	display: inline-block;
+	vertical-align: top;
+	box-sizing: border-box;
+	max-width: calc(100% - 24px);
+}
+
+.cdrNext::after {
+	content: "";
+	display: block;
+	clear: both;
+}
+
+.cdrNext p {
+	overflow-wrap: break-word;
+	word-wrap: break-word;
+}
