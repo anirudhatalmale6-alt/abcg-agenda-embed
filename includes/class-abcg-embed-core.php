@@ -15,12 +15,56 @@ class ABCG_Embed_Core {
 	/** Cookie prefix used to keep upstream cookies away from the site's own cookies. */
 	const COOKIE_PREFIX = 'abcgpx_';
 
+	/**
+	 * User-Agent sent upstream, deliberately fixed.
+	 *
+	 * admin.abcg.ch sniffs the User-Agent and 302s phones and tablets from
+	 * frmActNext/frmActLst to its own mobActLst.aspx. Forwarding the visitor's
+	 * real User-Agent therefore made every embed redirect on a phone, and
+	 * mobActLst is the whole agenda list, so following it would also replace the
+	 * home page's three-event strip with the full list. A fixed desktop
+	 * User-Agent keeps each view returning the page it is supposed to return, on
+	 * every device; the layout is then adapted for small screens by our own CSS.
+	 */
+	const UPSTREAM_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+	/** Host the proxy is allowed to talk to. */
+	const UPSTREAM_HOST = 'admin.abcg.ch';
+
 	/** Only these views may be requested. Prevents the endpoint being used as an open proxy. */
 	public static function views() {
 		return array(
-			'next' => 'https://admin.abcg.ch/public/frmActNext.aspx',
-			'list' => 'https://admin.abcg.ch/public/frmActLst.aspx',
+			'next'   => 'https://admin.abcg.ch/public/frmActNext.aspx',
+			'list'   => 'https://admin.abcg.ch/public/frmActLst.aspx',
+			'last'   => 'https://admin.abcg.ch/public/frmActLast.aspx',
+			'agnext' => 'https://admin.abcg.ch/public/frmAgNext.aspx',
 		);
+	}
+
+	/**
+	 * Resolve an upstream Location against the page it came from, and refuse
+	 * anything that leaves the upstream host.
+	 */
+	public static function resolve_upstream_redirect( $location, $current_url ) {
+		$location = trim( (string) $location );
+		if ( '' === $location ) {
+			return '';
+		}
+
+		if ( preg_match( '#^https?://#i', $location ) ) {
+			$target = $location;
+		} elseif ( strpos( $location, '//' ) === 0 ) {
+			// Scheme-relative: "//host/path" names a host, it is not a path.
+			$target = 'https:' . $location;
+		} elseif ( strpos( $location, '/' ) === 0 ) {
+			$target = 'https://' . self::UPSTREAM_HOST . $location;
+		} else {
+			$target = substr( $current_url, 0, strrpos( $current_url, '/' ) + 1 ) . $location;
+		}
+
+		$host = (string) parse_url( $target, PHP_URL_HOST );
+
+		return ( strtolower( $host ) === self::UPSTREAM_HOST ) ? $target : '';
 	}
 
 	public static function is_valid_view( $view ) {
@@ -49,8 +93,8 @@ class ABCG_Embed_Core {
 	 *
 	 * @return array{status:int,body:string,content_type:string,set_cookie:string[],location:string}
 	 */
-	public static function fetch( $view, array $request ) {
-		$url = self::upstream_url( $view );
+	public static function fetch( $view, array $request, $url_override = '' ) {
+		$url = '' !== $url_override ? $url_override : self::upstream_url( $view );
 
 		$headers    = array( 'Accept-Language: ' . ( $request['accept_language'] ?: 'fr-CH,fr;q=0.9' ) );
 		$cookie_str = self::forwarded_cookie_header( $request['cookies'] );
@@ -71,7 +115,7 @@ class ABCG_Embed_Core {
 				CURLOPT_TIMEOUT        => 20,
 				CURLOPT_CONNECTTIMEOUT => 10,
 				CURLOPT_ENCODING       => '',
-				CURLOPT_USERAGENT      => $request['user_agent'] ?: 'Mozilla/5.0',
+				CURLOPT_USERAGENT      => self::UPSTREAM_UA,
 				CURLOPT_HTTPHEADER     => $headers,
 				CURLOPT_HEADERFUNCTION => function ( $ch, $line ) use ( &$set_cookies, &$location ) {
 					if ( stripos( $line, 'Set-Cookie:' ) === 0 ) {
@@ -83,6 +127,15 @@ class ABCG_Embed_Core {
 				},
 			)
 		);
+
+		/*
+		 * This host's cURL has no usable CA path of its own, so verification
+		 * fails with "unable to get local issuer certificate". WordPress ships
+		 * its own bundle; point at it rather than turning verification off.
+		 */
+		if ( ! empty( $request['ca_bundle'] ) && is_readable( $request['ca_bundle'] ) ) {
+			curl_setopt( $ch, CURLOPT_CAINFO, $request['ca_bundle'] );
+		}
 
 		if ( 'POST' === strtoupper( $request['method'] ) ) {
 			curl_setopt( $ch, CURLOPT_POST, true );
@@ -166,7 +219,7 @@ class ABCG_Embed_Core {
 	 * @param string $frame_id  Carried through postbacks so the reloaded page
 	 *                          still knows which iframe it belongs to.
 	 */
-	public static function transform( $html, $view, $proxy_url, $frame_id = '' ) {
+	public static function transform( $html, $view, $proxy_url, $frame_id = '', $final_url = '' ) {
 		if ( '' === trim( $html ) || ! self::is_valid_view( $view ) ) {
 			return $html;
 		}
@@ -176,7 +229,10 @@ class ABCG_Embed_Core {
 				. 'abcgid=' . rawurlencode( $frame_id );
 		}
 
-		$base = self::upstream_base( $view );
+		// If a redirect was followed, assets resolve against the page we ended on.
+		$base = ( '' !== $final_url )
+			? substr( $final_url, 0, strrpos( $final_url, '/' ) + 1 )
+			: self::upstream_base( $view );
 
 		// Assets and any relative link keep resolving against the upstream folder.
 		if ( stripos( $html, '<base ' ) === false ) {
